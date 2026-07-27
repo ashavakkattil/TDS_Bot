@@ -16,15 +16,15 @@ logging.basicConfig(level=logging.INFO)
 
 # Config
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")
-AIPROXY_TOKEN = os.getenv("AIPROXY_TOKEN")
-API_KEY = AIPROXY_TOKEN or os.getenv("OPENAI_API_KEY")
+AIPIPE_TOKEN = os.getenv("AIPIPE_TOKEN") or os.getenv("AIPROXY_TOKEN")
+API_KEY = AIPIPE_TOKEN or os.getenv("OPENAI_API_KEY")
 PUBLIC_URL = os.getenv("PUBLIC_URL", "http://127.0.0.1:8000")
 LOG_FILE = "run.jsonl"
 LOG_URL = f"{PUBLIC_URL}/run.jsonl"
 
 client = AsyncOpenAI(
     api_key=API_KEY, 
-    base_url="https://aipipe.org/openai/v1" if AIPROXY_TOKEN else None
+    base_url="https://aipipe.org/openai/v1" if AIPIPE_TOKEN else None
 ) if API_KEY else None
 
 app = FastAPI()
