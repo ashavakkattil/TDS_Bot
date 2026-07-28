@@ -1,4 +1,4 @@
-#Telegram Data-Analysis Agent
+# Telegram Data-Analysis Agent
 
 This directory contains a Telegram bot that acts as a multi-turn LLM data-analysis agent, along with a lightweight FastAPI server that simultaneously exposes the agent's run log (`run.jsonl`) to the public internet.
 
