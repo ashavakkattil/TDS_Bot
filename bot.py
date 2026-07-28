@@ -2,6 +2,8 @@ import os
 import json
 import asyncio
 import logging
+import subprocess
+import httpx
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
@@ -14,18 +16,63 @@ load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 
-# Config
+# --- CONFIGURATION ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")
-AIPIPE_TOKEN = os.getenv("AIPIPE_TOKEN") or os.getenv("AIPROXY_TOKEN")
-API_KEY = AIPIPE_TOKEN or os.getenv("OPENAI_API_KEY")
 PUBLIC_URL = os.getenv("PUBLIC_URL", "http://127.0.0.1:8000")
 LOG_FILE = "run.jsonl"
 LOG_URL = f"{PUBLIC_URL}/run.jsonl"
 
-client = AsyncOpenAI(
-    api_key=API_KEY, 
-    base_url="https://aipipe.org/openai/v1" if AIPIPE_TOKEN else None
-) if API_KEY else None
+# 1. Primary AIPIPE Client
+aipipe_token = os.getenv("AIPIPE_TOKEN") or os.getenv("AIPROXY_TOKEN")
+client_aipipe = AsyncOpenAI(
+    api_key=aipipe_token, 
+    base_url="https://aipipe.org/openai/v1"
+) if aipipe_token else None
+
+# 2. Fallback GROQ Client
+groq_key = os.getenv("OPENAI_API_KEY")
+client_groq = AsyncOpenAI(
+    api_key=groq_key, 
+    base_url="https://api.groq.com/openai/v1"
+) if groq_key else None
+
+async def call_llm_with_fallback(messages, tools, strict_mode=False):
+    errors = []
+    
+    # Try AIPIPE First
+    if client_aipipe:
+        try:
+            return await client_aipipe.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                tools=tools
+            )
+        except Exception as e:
+            errors.append(f"AIPIPE error: {e}")
+            logging.warning(f"AIPIPE failed, falling back to Groq... ({e})")
+            
+    # Fallback to GROQ
+    if client_groq:
+        try:
+            current_messages = messages
+            if strict_mode:
+                # Append strict instructions to force Llama 3 to use JSON tools properly
+                current_messages = messages + [{"role": "system", "content": "CRITICAL ERROR: You just failed to format a tool call. You MUST use the official JSON schema for tool calls. DO NOT output <function> tags. DO NOT output raw text."}]
+                
+            return await client_groq.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=current_messages,
+                tools=tools
+            )
+        except Exception as e:
+            # If Groq fails due to tool hallucination, recursively retry once in strict mode
+            if not strict_mode and "tool_use_failed" in str(e):
+                logging.warning("Groq tool hallucination detected! Retrying with strict instructions...")
+                return await call_llm_with_fallback(messages, tools, strict_mode=True)
+                
+            errors.append(f"GROQ error: {e}")
+            
+    raise Exception(f"All LLM providers failed. Errors: {errors}")
 
 app = FastAPI()
 
@@ -44,17 +91,95 @@ def append_to_log(user_id, question, answer):
     with open(LOG_FILE, "a") as f:
         f.write(json.dumps(entry) + "\n")
 
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "python_execute",
+            "description": "Execute Python code locally to analyze data and return stdout/stderr. Do not run destructive commands.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "The Python code to execute"
+                    }
+                },
+                "required": ["code"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_url",
+            "description": "Fetch text/csv/json content from a URL.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The URL to fetch"
+                    }
+                },
+                "required": ["url"]
+            }
+        }
+    }
+]
+
+async def execute_tool(tool_call):
+    name = tool_call.function.name
+    args = json.loads(tool_call.function.arguments)
+    
+    if name == "python_execute":
+        code = args.get("code", "")
+        try:
+            result = subprocess.run(["python3", "-c", code], capture_output=True, text=True, timeout=30)
+            return result.stdout if result.returncode == 0 else result.stderr
+        except Exception as e:
+            return str(e)
+            
+    elif name == "fetch_url":
+        url = args.get("url", "")
+        try:
+            async with httpx.AsyncClient(verify=False) as client:
+                resp = await client.get(url, timeout=30)
+                return resp.text[:10000] # Truncate to avoid blowing up context window
+        except Exception as e:
+            return str(e)
+            
+    return "Unknown tool"
+
 async def analyze_data_with_llm(context_messages):
-    if not client:
-        return "LLM API key not configured."
-    try:
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "system", "content": "You are a data-analysis agent. Always return raw JSON. If the user asks for a specific JSON structure with 'answer' and 'log_url', output exactly that structure."}] + context_messages
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        return str(e)
+    if not client_aipipe and not client_groq:
+        return '{"error": "No LLM API keys configured. Set AIPIPE_TOKEN or OPENAI_API_KEY."}'
+        
+    messages = [{"role": "system", "content": "You are a data-analysis agent. You can fetch URLs and execute python code. Always return the final answer as a raw JSON object."}] + context_messages
+    
+    for _ in range(5): # Allow up to 5 tool-calling iterations
+        try:
+            response = await call_llm_with_fallback(messages, tools)
+            msg = response.choices[0].message
+            # Groq throws 400 if we pass objects with None values, so we convert it to a clean dictionary
+            msg_dict = msg.model_dump(exclude_none=True)
+            messages.append(msg_dict)
+            
+            if msg.tool_calls:
+                for tool_call in msg.tool_calls:
+                    result = await execute_tool(tool_call)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": tool_call.function.name,
+                        "content": str(result)
+                    })
+            else:
+                return msg.content
+        except Exception as e:
+            return str(e)
+            
+    return '{"error": "Reached maximum tool iterations"}'
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -86,10 +211,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         parsed_answer = clean_text
 
-    # Check if the LLM already wrapped it in the expected outer format
-    # The grader checks if the entire reply == expected object.
-    # Therefore, we just return exactly what the LLM (and thus the prompt) requested.
-    response_json = parsed_answer
+    # Strictly enforce the official document format
+    if isinstance(parsed_answer, dict) and "answer" in parsed_answer and "log_url" in parsed_answer:
+        response_json = parsed_answer
+        response_json["log_url"] = LOG_URL # Ensure it points to our actual host
+    else:
+        response_json = {
+            "answer": parsed_answer,
+            "log_url": LOG_URL
+        }
     
     # Log the interaction using the final answer sent to the user
     append_to_log(user_id, user_text, response_json)

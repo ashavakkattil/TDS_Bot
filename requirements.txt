@@ -3,3 +3,4 @@ uvicorn
 python-telegram-bot
 openai
 python-dotenv
+httpx
