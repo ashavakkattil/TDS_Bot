@@ -60,7 +60,7 @@ async def call_llm_with_fallback(messages, tools, strict_mode=False):
                 current_messages = messages + [{"role": "system", "content": "CRITICAL ERROR: You just failed to format a tool call. You MUST use the official JSON schema for tool calls. DO NOT output <function> tags. DO NOT output raw text."}]
                 
             return await client_groq.chat.completions.create(
-                model="llama-3.1-8b-instant",
+                model="mixtral-8x7b-32768",
                 messages=current_messages,
                 tools=tools
             )
