@@ -155,7 +155,7 @@ async def analyze_data_with_llm(context_messages):
     if not client_aipipe and not client_groq:
         return '{"error": "No LLM API keys configured. Set AIPIPE_TOKEN or OPENAI_API_KEY."}'
         
-    messages = [{"role": "system", "content": "You are a data-analysis agent. To save context space, ALWAYS use python_execute to download, read, and process datasets (e.g. using pandas or requests) instead of using the fetch_url tool. Only use fetch_url for small text snippets. Always return the final answer as a raw JSON object."}] + context_messages
+    messages = [{"role": "system", "content": "You are a data-analysis agent. If you need to analyze a dataset, ALWAYS use python_execute to download, read, and process datasets (e.g. using pandas or requests) instead of using the fetch_url tool to save context space. Always return the final answer as a raw JSON object."}] + context_messages
     
     for _ in range(5): # Allow up to 5 tool-calling iterations
         try:
