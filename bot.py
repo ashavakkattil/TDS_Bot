@@ -51,28 +51,39 @@ async def call_llm_with_fallback(messages, tools, strict_mode=False):
             errors.append(f"AIPIPE error: {e}")
             logging.warning(f"AIPIPE failed, falling back to Groq... ({e})")
             
-    # Fallback to GROQ
+    # Fallback to GROQ with a multi-model cascade
     if client_groq:
-        try:
-            current_messages = messages
-            if strict_mode:
-                # Append strict instructions to force Llama 3 to use JSON tools properly
-                current_messages = messages + [{"role": "system", "content": "CRITICAL ERROR: You just failed to format a tool call. You MUST use the official JSON schema for tool calls. DO NOT output <function> tags. DO NOT output raw text."}]
+        groq_models = [
+            "llama-3.3-70b-versatile", 
+            "mixtral-8x7b-32768", 
+            "llama3-70b-8192", 
+            "llama-3.1-8b-instant"
+        ]
+        
+        current_messages = messages
+        if strict_mode:
+            current_messages = messages + [{"role": "system", "content": "CRITICAL ERROR: You just failed to format a tool call. You MUST use the official JSON schema for tool calls. DO NOT output <function> tags. DO NOT output raw text."}]
+
+        for model in groq_models:
+            try:
+                return await client_groq.chat.completions.create(
+                    model=model,
+                    messages=current_messages,
+                    tools=tools
+                )
+            except Exception as e:
+                error_str = str(e)
+                if not strict_mode and "tool_use_failed" in error_str:
+                    logging.warning(f"Groq tool hallucination on {model}! Retrying with strict instructions...")
+                    try:
+                        return await call_llm_with_fallback(messages, tools, strict_mode=True)
+                    except Exception:
+                        pass # If strict mode fails, it will bubble up, so we just catch and let it continue to the next model
                 
-            return await client_groq.chat.completions.create(
-                model="mixtral-8x7b-32768",
-                messages=current_messages,
-                tools=tools
-            )
-        except Exception as e:
-            # If Groq fails due to tool hallucination, recursively retry once in strict mode
-            if not strict_mode and "tool_use_failed" in str(e):
-                logging.warning("Groq tool hallucination detected! Retrying with strict instructions...")
-                return await call_llm_with_fallback(messages, tools, strict_mode=True)
-                
-            errors.append(f"GROQ error: {e}")
+                logging.warning(f"Groq model {model} failed ({error_str}). Trying next model...")
+                errors.append(f"GROQ {model} error: {error_str}")
             
-    raise Exception(f"All LLM providers failed. Errors: {errors}")
+    raise Exception(f"All LLM providers and models failed. Errors: {errors}")
 
 app = FastAPI()
 
