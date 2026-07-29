@@ -60,7 +60,7 @@ async def call_llm_with_fallback(messages, tools, strict_mode=False):
                 current_messages = messages + [{"role": "system", "content": "CRITICAL ERROR: You just failed to format a tool call. You MUST use the official JSON schema for tool calls. DO NOT output <function> tags. DO NOT output raw text."}]
                 
             return await client_groq.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="llama-3.1-8b-instant",
                 messages=current_messages,
                 tools=tools
             )
@@ -113,7 +113,7 @@ tools = [
         "type": "function",
         "function": {
             "name": "fetch_url",
-            "description": "Fetch text/csv/json content from a URL.",
+            "description": "Fetch raw text content from a URL. DO NOT use this for large datasets or CSV files! For datasets, use python_execute to download and process them directly in Python.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -155,7 +155,7 @@ async def analyze_data_with_llm(context_messages):
     if not client_aipipe and not client_groq:
         return '{"error": "No LLM API keys configured. Set AIPIPE_TOKEN or OPENAI_API_KEY."}'
         
-    messages = [{"role": "system", "content": "You are a data-analysis agent. You can fetch URLs and execute python code. Always return the final answer as a raw JSON object."}] + context_messages
+    messages = [{"role": "system", "content": "You are a data-analysis agent. To save context space, ALWAYS use python_execute to download, read, and process datasets (e.g. using pandas or requests) instead of using the fetch_url tool. Only use fetch_url for small text snippets. Always return the final answer as a raw JSON object."}] + context_messages
     
     for _ in range(5): # Allow up to 5 tool-calling iterations
         try:
